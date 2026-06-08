@@ -189,7 +189,7 @@ h1 {
 
 .icon-button {
   display: inline-grid;
-  width: 30px;
+  width: 48px;
   height: 30px;
   flex: 0 0 auto;
   place-items: center;
@@ -203,4 +203,3 @@ h1 {
 .icon-button:hover {
   border-color: var(--accent);
 }
-
