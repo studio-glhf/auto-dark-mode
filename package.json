@@ -1,0 +1,13 @@
+{
+  "name": "auto-dark-mode-switch",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chrome extension that prefers native dark mode, then falls back to Chrome Auto Dark Mode.",
+  "scripts": {
+    "make:icons": "node scripts/make-icons.mjs",
+    "test": "node --test tests/*.test.js",
+    "package": "node scripts/package.mjs"
+  },
+  "license": "MIT"
+}
+

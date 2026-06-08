@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "Auto Dark Mode Switch",
+  "version": "0.1.0",
+  "description": "Uses native dark mode when available, then Chrome Auto Dark Mode for light pages.",
+  "permissions": [
+    "debugger",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "src/background/service-worker.js"
+  },
+  "action": {
+    "default_title": "Auto Dark Mode Switch",
+    "default_popup": "src/popup/popup.html",
+    "default_icon": {
+      "16": "assets/icons/icon-16.png",
+      "32": "assets/icons/icon-32.png",
+      "48": "assets/icons/icon-48.png",
+      "128": "assets/icons/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "assets/icons/icon-16.png",
+    "32": "assets/icons/icon-32.png",
+    "48": "assets/icons/icon-48.png",
+    "128": "assets/icons/icon-128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "src/shared/detector-core.js",
+        "src/content/probe.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
+

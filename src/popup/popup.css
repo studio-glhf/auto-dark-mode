@@ -1,0 +1,206 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f7f7f5;
+  --panel: #ffffff;
+  --text: #18181b;
+  --muted: #6b7280;
+  --border: #deded8;
+  --accent: #2563eb;
+  --accent-dark: #172554;
+  --ok: #15803d;
+  --warn: #b45309;
+  --error: #b91c1c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141414;
+    --panel: #1f1f1f;
+    --text: #f4f4f5;
+    --muted: #a1a1aa;
+    --border: #343434;
+    --accent: #60a5fa;
+    --accent-dark: #bfdbfe;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  width: 310px;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.popup-shell {
+  padding: 14px;
+}
+
+.top-row,
+.footer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.host {
+  max-width: 210px;
+  margin: 1px 0 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.switch {
+  position: relative;
+  display: inline-flex;
+  width: 42px;
+  height: 24px;
+  flex: 0 0 auto;
+}
+
+.switch input {
+  position: absolute;
+  opacity: 0;
+}
+
+.switch-track {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #d4d4d8;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.switch-track::after {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 20%);
+  content: "";
+  transition: transform 120ms ease;
+}
+
+.switch input:checked + .switch-track {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.switch input:checked + .switch-track::after {
+  transform: translateX(18px);
+}
+
+.status-panel {
+  min-height: 78px;
+  margin: 14px 0 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.status-label {
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.status-detail {
+  margin-top: 4px;
+  color: var(--muted);
+}
+
+.status-panel[data-status="native-dark"] .status-label,
+.status-panel[data-status="auto-dark"] .status-label,
+.status-panel[data-status="not-needed"] .status-label {
+  color: var(--ok);
+}
+
+.status-panel[data-status="blocked"] .status-label,
+.status-panel[data-status="unsupported"] .status-label {
+  color: var(--error);
+}
+
+.status-panel[data-status="checking"] .status-label {
+  color: var(--warn);
+}
+
+.mode-group {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 70%, var(--bg));
+}
+
+.mode-button {
+  min-height: 32px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.mode-button:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--text);
+}
+
+.mode-button[aria-pressed="true"] {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 650;
+}
+
+.footer-row {
+  margin-top: 12px;
+}
+
+.debugger-note {
+  min-height: 18px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.icon-button {
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.icon-button:hover {
+  border-color: var(--accent);
+}
+
