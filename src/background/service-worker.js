@@ -16,6 +16,8 @@ const attachedTabs = new Map();
 const tabStates = new Map();
 const scheduledChecks = new Map();
 const inFlightChecks = new Set();
+const pendingChecks = new Map();
+const tabGenerations = new Map();
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -41,6 +43,26 @@ function errorMessage(error) {
   return error && error.message ? error.message : String(error || "Unknown error");
 }
 
+function makeTabStateError(code, message, tab = null) {
+  const error = new Error(message);
+  error.name = "TabStateChangedError";
+  error.code = code;
+  error.tab = tab;
+  return error;
+}
+
+function isTabStateChangedError(error) {
+  return error && error.name === "TabStateChangedError";
+}
+
+function getTabGeneration(tabId) {
+  return tabGenerations.get(tabId) || 0;
+}
+
+function bumpTabGeneration(tabId) {
+  tabGenerations.set(tabId, getTabGeneration(tabId) + 1);
+}
+
 async function getSettings() {
   const stored = await chrome.storage.local.get(SETTINGS_DEFAULTS);
   return {
@@ -61,11 +83,12 @@ async function setSiteRule(hostname, rule) {
   const settings = await getSettings();
   const siteRules = { ...settings.siteRules };
   const normalized = AutoDarkDetector.normalizeRule(rule);
+  const normalizedHost = hostname.toLowerCase();
 
   if (normalized === "auto") {
-    delete siteRules[hostname];
+    delete siteRules[normalizedHost];
   } else {
-    siteRules[hostname] = normalized;
+    siteRules[normalizedHost] = normalized;
   }
 
   await chrome.storage.local.set({ siteRules });
@@ -105,7 +128,69 @@ async function getActiveTab() {
   return tabs && tabs.length ? tabs[0] : null;
 }
 
-async function ensureDebugger(tabId) {
+async function getEvaluableTab(tabId, target = null) {
+  const tab = await getTab(tabId);
+  if (!tab) {
+    return {
+      ok: false,
+      code: "missing-tab",
+      tab: null,
+      message: "The tab is no longer available."
+    };
+  }
+
+  if (!isSupportedUrl(tab.url)) {
+    return {
+      ok: false,
+      code: "unsupported-url",
+      tab,
+      message: "This extension only runs on normal http and https pages."
+    };
+  }
+
+  const activeTab = await getActiveTab();
+  if (!activeTab || activeTab.id !== tabId) {
+    return {
+      ok: false,
+      code: "inactive-tab",
+      tab,
+      message: "Automatic dark mode only runs on the active tab in the current window."
+    };
+  }
+
+  if (target && target.url !== tab.url) {
+    return {
+      ok: false,
+      code: "changed-url",
+      tab,
+      message: "The tab URL changed before the dark-mode check finished."
+    };
+  }
+
+  if (target && target.generation !== getTabGeneration(tabId)) {
+    return {
+      ok: false,
+      code: "changed-tab",
+      tab,
+      message: "The tab changed before the dark-mode check finished."
+    };
+  }
+
+  return { ok: true, tab };
+}
+
+async function requireEvaluableTab(tabId, target = null) {
+  const result = await getEvaluableTab(tabId, target);
+  if (result.ok) {
+    return result.tab;
+  }
+
+  throw makeTabStateError(result.code, result.message, result.tab);
+}
+
+async function ensureDebugger(tabId, target = null) {
+  await requireEvaluableTab(tabId, target);
+
   const existing = attachedTabs.get(tabId);
   if (existing && existing.attached) {
     return true;
@@ -113,10 +198,16 @@ async function ensureDebugger(tabId) {
 
   try {
     await chrome.debugger.attach({ tabId }, DEBUGGER_VERSION);
+    await requireEvaluableTab(tabId, target);
     attachedTabs.set(tabId, { attached: true, mode: "attached" });
     setTabState(tabId, { debuggerAttached: true });
     return true;
   } catch (error) {
+    if (isTabStateChangedError(error)) {
+      await clearDarkMode(tabId);
+      throw error;
+    }
+
     const detail = errorMessage(error);
     setTabState(tabId, {
       status: "blocked",
@@ -128,24 +219,28 @@ async function ensureDebugger(tabId) {
   }
 }
 
-async function sendCommand(tabId, method, params) {
-  const attached = await ensureDebugger(tabId);
+async function sendCommand(tabId, method, params, target = null) {
+  await requireEvaluableTab(tabId, target);
+  const attached = await ensureDebugger(tabId, target);
   if (!attached) {
     throw new Error("Debugger is not available for this tab.");
   }
 
-  return chrome.debugger.sendCommand({ tabId }, method, params);
+  await requireEvaluableTab(tabId, target);
+  const result = await chrome.debugger.sendCommand({ tabId }, method, params);
+  await requireEvaluableTab(tabId, target);
+  return result;
 }
 
-async function setNativeDark(tabId, enabled) {
+async function setNativeDark(tabId, enabled, target = null) {
   const params = enabled
     ? { features: [{ name: "prefers-color-scheme", value: "dark" }] }
     : { features: [] };
-  await sendCommand(tabId, "Emulation.setEmulatedMedia", params);
+  await sendCommand(tabId, "Emulation.setEmulatedMedia", params, target);
 }
 
-async function setAutoDark(tabId, enabled) {
-  await sendCommand(tabId, "Emulation.setAutoDarkModeOverride", { enabled });
+async function setAutoDark(tabId, enabled, target = null) {
+  await sendCommand(tabId, "Emulation.setAutoDarkModeOverride", { enabled }, target);
 }
 
 async function clearDarkMode(tabId) {
@@ -155,13 +250,13 @@ async function clearDarkMode(tabId) {
   }
 
   try {
-    await setAutoDark(tabId, false);
+    await chrome.debugger.sendCommand({ tabId }, "Emulation.setAutoDarkModeOverride", { enabled: false });
   } catch (_error) {
     // Best-effort cleanup; detach below still releases the session.
   }
 
   try {
-    await setNativeDark(tabId, false);
+    await chrome.debugger.sendCommand({ tabId }, "Emulation.setEmulatedMedia", { features: [] });
   } catch (_error) {
     // Best-effort cleanup; detach below still releases the session.
   }
@@ -176,39 +271,56 @@ async function clearDarkMode(tabId) {
   setTabState(tabId, { debuggerAttached: false });
 }
 
-async function probeTab(tabId) {
+async function clearOtherAttachedTabs(activeTabId) {
+  const tabIds = Array.from(attachedTabs.keys()).filter((tabId) => tabId !== activeTabId);
+  for (const tabId of tabIds) {
+    await clearDarkMode(tabId);
+  }
+}
+
+async function probeTab(tabId, target) {
+  await requireEvaluableTab(tabId, target);
+
   try {
     const response = await chrome.tabs.sendMessage(tabId, { type: "ADM_PROBE" });
+    await requireEvaluableTab(tabId, target);
     if (response && response.ok && response.probe) {
       return response.probe;
     }
-  } catch (_error) {
+  } catch (error) {
+    if (isTabStateChangedError(error)) {
+      throw error;
+    }
     // Fall back to direct injection for pages that loaded before install.
   }
 
+  await requireEvaluableTab(tabId, target);
   await chrome.scripting.executeScript({
     target: { tabId },
     files: ["src/shared/detector-core.js"]
   });
 
+  await requireEvaluableTab(tabId, target);
   const [result] = await chrome.scripting.executeScript({
     target: { tabId },
     func: () => globalThis.AutoDarkDetector ? globalThis.AutoDarkDetector.probePage() : null
   });
 
+  await requireEvaluableTab(tabId, target);
   return result ? result.result : null;
 }
 
-async function applyNativeOnly(tabId, beforeProbe) {
-  await setAutoDark(tabId, false);
-  await setNativeDark(tabId, true);
+async function applyNativeOnly(tabId, beforeProbe, target) {
+  await setAutoDark(tabId, false, target);
+  await setNativeDark(tabId, true, target);
   await delay(240);
 
-  const afterProbe = await probeTab(tabId);
+  const afterProbe = await probeTab(tabId, target);
   const beforeScore = beforeProbe ? beforeProbe.score : null;
   const afterScore = afterProbe ? afterProbe.score : null;
   const worked = AutoDarkDetector.hasMeaningfulDarkening(beforeScore, afterScore) || Boolean(afterScore && afterScore.isDark);
 
+  await requireEvaluableTab(tabId, target);
   if (worked) {
     setTabState(tabId, {
       status: "native-dark",
@@ -228,9 +340,10 @@ async function applyNativeOnly(tabId, beforeProbe) {
   }
 }
 
-async function applyForceAuto(tabId, beforeProbe) {
-  await setNativeDark(tabId, false);
-  await setAutoDark(tabId, true);
+async function applyForceAuto(tabId, beforeProbe, target) {
+  await setNativeDark(tabId, false, target);
+  await setAutoDark(tabId, true, target);
+  await requireEvaluableTab(tabId, target);
   attachedTabs.set(tabId, { attached: true, mode: "auto" });
   setTabState(tabId, {
     status: "auto-dark",
@@ -243,6 +356,7 @@ async function applyForceAuto(tabId, beforeProbe) {
 
 async function evaluateTab(tabId, reason) {
   if (inFlightChecks.has(tabId)) {
+    pendingChecks.set(tabId, reason || "pending");
     return;
   }
 
@@ -255,19 +369,24 @@ async function evaluateTab(tabId, reason) {
   });
 
   try {
-    const tab = await getTab(tabId);
-    if (!tab || !isSupportedUrl(tab.url)) {
+    const eligibility = await getEvaluableTab(tabId);
+    if (!eligibility.ok) {
       await clearDarkMode(tabId);
       setTabState(tabId, {
         status: "unsupported",
         label: "Unsupported",
-        detail: "This extension only runs on normal http and https pages.",
-        url: tab ? tab.url : "",
+        detail: eligibility.message,
+        url: eligibility.tab ? eligibility.tab.url : "",
         host: null
       });
       return;
     }
 
+    const tab = eligibility.tab;
+    const target = {
+      url: tab.url,
+      generation: getTabGeneration(tabId)
+    };
     const settings = await getSettings();
     const host = getHostname(tab.url);
     const rule = AutoDarkDetector.resolveSiteRule(settings.siteRules, host);
@@ -299,8 +418,10 @@ async function evaluateTab(tabId, reason) {
       return;
     }
 
-    const beforeProbe = await probeTab(tabId);
+    await requireEvaluableTab(tabId, target);
+    const beforeProbe = await probeTab(tabId, target);
     const beforeScore = beforeProbe ? beforeProbe.score : null;
+    await requireEvaluableTab(tabId, target);
 
     if (!beforeScore) {
       setTabState(tabId, {
@@ -313,11 +434,12 @@ async function evaluateTab(tabId, reason) {
     }
 
     if (rule === "force") {
-      await applyForceAuto(tabId, beforeProbe);
+      await applyForceAuto(tabId, beforeProbe, target);
       return;
     }
 
     if (beforeScore.isDark) {
+      await requireEvaluableTab(tabId, target);
       await clearDarkMode(tabId);
       setTabState(tabId, {
         status: "not-needed",
@@ -328,15 +450,41 @@ async function evaluateTab(tabId, reason) {
       return;
     }
 
-    await applyNativeOnly(tabId, beforeProbe);
+    await applyNativeOnly(tabId, beforeProbe, target);
     const stateAfterNative = getTabState(tabId);
 
     if (rule === "native" || stateAfterNative.status === "native-dark") {
       return;
     }
 
-    await applyForceAuto(tabId, beforeProbe);
+    await applyForceAuto(tabId, beforeProbe, target);
   } catch (error) {
+    if (isTabStateChangedError(error)) {
+      await clearDarkMode(tabId);
+
+      if (error.code === "inactive-tab" || error.code === "unsupported-url" || error.code === "missing-tab") {
+        setTabState(tabId, {
+          status: "unsupported",
+          label: "Unsupported",
+          detail: error.message,
+          url: error.tab ? error.tab.url : "",
+          host: error.tab ? getHostname(error.tab.url) : null,
+          debuggerAttached: attachedTabs.has(tabId)
+        });
+      } else {
+        pendingChecks.set(tabId, "tab-changed");
+        setTabState(tabId, {
+          status: "checking",
+          label: "Checking",
+          detail: "The tab changed before the check finished; checking the current page.",
+          url: error.tab ? error.tab.url : "",
+          host: error.tab ? getHostname(error.tab.url) : null,
+          debuggerAttached: attachedTabs.has(tabId)
+        });
+      }
+      return;
+    }
+
     const detail = errorMessage(error);
     const unsupported = /wasn't found|unknown command|not supported/i.test(detail);
     setTabState(tabId, {
@@ -347,6 +495,11 @@ async function evaluateTab(tabId, reason) {
     });
   } finally {
     inFlightChecks.delete(tabId);
+    const pendingReason = pendingChecks.get(tabId);
+    if (pendingReason) {
+      pendingChecks.delete(tabId);
+      scheduleEvaluate(tabId, pendingReason, 50);
+    }
   }
 }
 
@@ -408,7 +561,11 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === "loading" && tab.url && isSupportedUrl(tab.url)) {
+  if (changeInfo.url || changeInfo.status === "loading" || changeInfo.status === "complete") {
+    bumpTabGeneration(tabId);
+  }
+
+  if (changeInfo.status === "loading" && tab.active && tab.url && isSupportedUrl(tab.url)) {
     setTabState(tabId, {
       status: "checking",
       label: "Checking",
@@ -418,18 +575,22 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     });
   }
 
-  if (changeInfo.status === "complete") {
+  if (changeInfo.status === "complete" && tab.active) {
     scheduleEvaluate(tabId, "navigation");
   }
 });
 
 chrome.tabs.onActivated.addListener((activeInfo) => {
-  scheduleEvaluate(activeInfo.tabId, "activated", 150);
+  clearOtherAttachedTabs(activeInfo.tabId).finally(() => {
+    scheduleEvaluate(activeInfo.tabId, "activated", 150);
+  });
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   attachedTabs.delete(tabId);
   tabStates.delete(tabId);
+  pendingChecks.delete(tabId);
+  tabGenerations.delete(tabId);
   const scheduled = scheduledChecks.get(tabId);
   if (scheduled) {
     clearTimeout(scheduled);
@@ -490,7 +651,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     if (message.type === "ADM_SET_SITE_RULE") {
       const tab = await getActiveTab();
-      const host = message.host || (tab ? getHostname(tab.url) : null);
+      const host = tab ? getHostname(tab.url) : null;
       await setSiteRule(host, message.rule);
       if (tab && typeof tab.id === "number") {
         scheduleEvaluate(tab.id, "site-rule", 50);
@@ -515,4 +676,3 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   return true;
 });
-

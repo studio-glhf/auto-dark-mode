@@ -49,3 +49,76 @@ test("normalizes and resolves per-site rules", () => {
   assert.equal(detector.resolveSiteRule({ "example.com": "force" }, "openai.com"), "auto");
 });
 
+test("page probe omits url/title and bounds toggle candidate scanning", () => {
+  const originalDocument = global.document;
+  const originalWindow = global.window;
+  const originalGetComputedStyle = global.getComputedStyle;
+  const originalNodeFilter = global.NodeFilter;
+  const originalLocation = global.location;
+  let matchCalls = 0;
+
+  const rootElement = {
+    isConnected: true,
+    parentElement: null,
+    textContent: "fixture",
+    getAttribute: () => "",
+    matches: () => false,
+    getBoundingClientRect: () => ({ width: 800, height: 600 })
+  };
+
+  const toggleNodes = Array.from({ length: 2000 }, () => ({
+    isConnected: true,
+    parentElement: rootElement,
+    textContent: "theme",
+    getAttribute: () => "",
+    matches: () => {
+      matchCalls += 1;
+      return true;
+    },
+    getBoundingClientRect: () => ({ width: 10, height: 10 })
+  }));
+
+  try {
+    global.NodeFilter = { SHOW_ELEMENT: 1 };
+    global.location = { href: "https://example.com/private-path?token=secret" };
+    global.window = { innerWidth: 800, innerHeight: 600 };
+    global.getComputedStyle = () => ({
+      backgroundColor: "rgb(255, 255, 255)",
+      color: "rgb(17, 24, 39)",
+      visibility: "visible",
+      display: "block",
+      opacity: "1",
+      colorScheme: ""
+    });
+    global.document = {
+      title: "Sensitive fixture title",
+      documentElement: {
+        ...rootElement,
+        clientWidth: 800,
+        clientHeight: 600
+      },
+      body: rootElement,
+      styleSheets: [],
+      querySelector: () => null,
+      elementFromPoint: () => rootElement,
+      createTreeWalker: () => {
+        let index = 0;
+        return {
+          nextNode: () => toggleNodes[index++] || null
+        };
+      }
+    };
+
+    const probe = detector.probePage();
+    assert.ok(probe);
+    assert.equal(Object.hasOwn(probe, "url"), false);
+    assert.equal(Object.hasOwn(probe, "title"), false);
+    assert.equal(matchCalls, 160);
+  } finally {
+    global.document = originalDocument;
+    global.window = originalWindow;
+    global.getComputedStyle = originalGetComputedStyle;
+    global.NodeFilter = originalNodeFilter;
+    global.location = originalLocation;
+  }
+});

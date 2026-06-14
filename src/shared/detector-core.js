@@ -9,6 +9,11 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function buildDetectorApi() {
   const DARK_TOGGLE_RE = /\b(dark|night|theme|appearance|color\s*scheme)\b/i;
   const RULES = new Set(["auto", "native", "force", "off"]);
+  const MAX_VISIBLE_ELEMENTS = 90;
+  const MAX_STYLESHEETS = 80;
+  const MAX_CSS_RULES_PER_SHEET = 800;
+  const MAX_TOGGLE_CANDIDATES = 160;
+  const MAX_TOGGLE_SCAN_NODES = 1200;
 
   function clamp(value, min, max) {
     return Math.min(max, Math.max(min, value));
@@ -154,12 +159,17 @@
 
     const viewportWidth = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 1);
     const viewportHeight = Math.max(1, window.innerHeight || document.documentElement.clientHeight || 1);
-    const elements = new Set([
-      document.documentElement,
-      document.body,
-      document.querySelector("main"),
-      document.querySelector("article")
-    ].filter(Boolean));
+    const elements = new Set();
+    const addElement = (element) => {
+      if (element && elements.size < MAX_VISIBLE_ELEMENTS) {
+        elements.add(element);
+      }
+    };
+
+    addElement(document.documentElement);
+    addElement(document.body);
+    addElement(document.querySelector("main"));
+    addElement(document.querySelector("article"));
 
     const columns = 5;
     const rows = 5;
@@ -169,20 +179,29 @@
         const y = Math.floor((viewportHeight * (row + 0.5)) / rows);
         const element = document.elementFromPoint(x, y);
         if (element) {
-          elements.add(element);
-          if (element.parentElement) {
-            elements.add(element.parentElement);
-          }
+          addElement(element);
+          addElement(element.parentElement);
         }
       }
     }
 
-    document.querySelectorAll("body, main, article, section, header, nav, aside, footer, [role='main'], [class*='content'], [class*='article']")
-      .forEach((element) => {
-        if (elements.size < 90) {
-          elements.add(element);
-        }
-      });
+    [
+      "body",
+      "main",
+      "article",
+      "section",
+      "header",
+      "nav",
+      "aside",
+      "footer",
+      "[role='main']",
+      "[class*='content']",
+      "[class*='article']"
+    ].forEach((selector) => {
+      if (elements.size < MAX_VISIBLE_ELEMENTS) {
+        addElement(document.querySelector(selector));
+      }
+    });
 
     return Array.from(elements).filter((element) => {
       if (!element || !element.isConnected) {
@@ -239,7 +258,11 @@
 
     const rootStyle = getComputedStyle(document.documentElement);
     const bodyStyle = document.body ? getComputedStyle(document.body) : null;
-    const metaColorScheme = Array.from(document.querySelectorAll("meta[name='color-scheme'], meta[name='supported-color-schemes']"))
+    const metaColorScheme = [
+      document.querySelector("meta[name='color-scheme']"),
+      document.querySelector("meta[name='supported-color-schemes']")
+    ]
+      .filter(Boolean)
       .map((element) => element.getAttribute("content") || "")
       .join(" ");
     const colorScheme = [
@@ -248,16 +271,9 @@
       metaColorScheme
     ].join(" ").trim();
 
-    const hasNativeHints = /\bdark\b/i.test(colorScheme) ||
-      Array.from(document.styleSheets || []).some((styleSheet) => {
-        try {
-          return Array.from(styleSheet.cssRules || []).some((rule) => /\(prefers-color-scheme:\s*dark\)/i.test(rule.cssText || ""));
-        } catch (_error) {
-          return false;
-        }
-      });
+    const hasNativeHints = /\bdark\b/i.test(colorScheme) || hasDarkPreferenceRule();
 
-    const candidates = Array.from(document.querySelectorAll("button, a, input, select, [role='button'], [aria-label], [title]")).slice(0, 160);
+    const candidates = collectToggleCandidates(MAX_TOGGLE_CANDIDATES);
     const hasToggleHint = candidates.some((element) => {
       const text = [
         element.textContent || "",
@@ -277,6 +293,69 @@
     };
   }
 
+  function hasDarkPreferenceRule() {
+    if (typeof document === "undefined") {
+      return false;
+    }
+
+    const styleSheets = document.styleSheets || [];
+    const sheetCount = Math.min(styleSheets.length || 0, MAX_STYLESHEETS);
+    for (let sheetIndex = 0; sheetIndex < sheetCount; sheetIndex += 1) {
+      const styleSheet = styleSheets[sheetIndex];
+      let cssRules;
+      try {
+        cssRules = styleSheet ? styleSheet.cssRules : null;
+      } catch (_error) {
+        cssRules = null;
+      }
+
+      if (!cssRules) {
+        continue;
+      }
+
+      const ruleCount = Math.min(cssRules.length || 0, MAX_CSS_RULES_PER_SHEET);
+      for (let ruleIndex = 0; ruleIndex < ruleCount; ruleIndex += 1) {
+        const rule = cssRules[ruleIndex];
+        if (rule && /\(prefers-color-scheme:\s*dark\)/i.test(rule.cssText || "")) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  function collectToggleCandidates(limit) {
+    if (typeof document === "undefined") {
+      return [];
+    }
+
+    const root = document.body || document.documentElement;
+    if (!root || typeof document.createTreeWalker !== "function") {
+      return [];
+    }
+
+    const nodeFilter = typeof NodeFilter !== "undefined" ? NodeFilter : { SHOW_ELEMENT: 1 };
+    const selector = "button, a, input, select, [role='button'], [aria-label], [title]";
+    const candidates = [];
+    const walker = document.createTreeWalker(root, nodeFilter.SHOW_ELEMENT);
+    let scanned = 0;
+
+    while (scanned < MAX_TOGGLE_SCAN_NODES && candidates.length < limit) {
+      const element = walker.nextNode();
+      if (!element) {
+        break;
+      }
+
+      scanned += 1;
+      if (typeof element.matches === "function" && element.matches(selector)) {
+        candidates.push(element);
+      }
+    }
+
+    return candidates;
+  }
+
   function probePage() {
     if (typeof document === "undefined") {
       return null;
@@ -286,8 +365,6 @@
     const colors = collectColorsFromElements(elements);
     const hints = detectHints();
     const probe = {
-      url: location.href,
-      title: document.title,
       backgrounds: colors.backgrounds,
       foregrounds: colors.foregrounds,
       hints,
@@ -314,4 +391,3 @@
     probePage
   };
 });
-
